@@ -2,37 +2,160 @@ import streamlit as st
 import cv2
 import numpy as np
 from PIL import Image
+import tempfile
+import os
 from tensorflow.keras.applications.efficientnet import EfficientNetB7, preprocess_input, decode_predictions
+from typing import Tuple, Optional
+import logging
 
-# Load pre-trained EfficientNetB7 model
-model = EfficientNetB7(weights='imagenet')
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-def classify_image(image_path):
-    img = cv2.imread(image_path)
-    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)  # Convert to RGB
-    img = cv2.resize(img, (600, 600))
-    img = np.expand_dims(img, axis=0)
-    img = preprocess_input(img)
-    preds = model.predict(img)
-    label = decode_predictions(preds, top=1)[0][0][1]
-    return label
+class ImageClassifier:
+    def __init__(self):
+        """Initialize the image classifier with EfficientNetB7 model."""
+        try:
+            self.model = EfficientNetB7(weights='imagenet')
+            logger.info("Model loaded successfully")
+        except Exception as e:
+            logger.error(f"Error loading model: {str(e)}")
+            st.error("Failed to load the classification model. Please try again later.")
+            
+    def preprocess_image(self, img: np.ndarray, target_size: Tuple[int, int] = (600, 600)) -> np.ndarray:
+        """
+        Preprocess the image for model input.
+        
+        Args:
+            img: Input image array
+            target_size: Target size for resizing
+            
+        Returns:
+            Preprocessed image array
+        """
+        try:
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            img = cv2.resize(img, target_size)
+            img = np.expand_dims(img, axis=0)
+            return preprocess_input(img)
+        except Exception as e:
+            logger.error(f"Error preprocessing image: {str(e)}")
+            raise
 
-st.title("PetPals App")
+    def classify_image(self, image_path: str) -> Optional[Tuple[str, float]]:
+        """
+        Classify the image and return prediction with confidence score.
+        
+        Args:
+            image_path: Path to the image file
+            
+        Returns:
+            Tuple of (predicted_label, confidence_score) or None if error occurs
+        """
+        try:
+            img = cv2.imread(image_path)
+            if img is None:
+                raise ValueError("Failed to load image")
+                
+            processed_img = self.preprocess_image(img)
+            preds = self.model.predict(processed_img, verbose=0)
+            prediction = decode_predictions(preds, top=1)[0][0]
+            return prediction[1], float(prediction[2])  # Return label and confidence
+            
+        except Exception as e:
+            logger.error(f"Error during classification: {str(e)}")
+            return None
 
-st.write("Welcome to the PetPals Image Classification App")
+@st.cache_resource
+def get_classifier() -> ImageClassifier:
+    """Create or retrieve cached classifier instance."""
+    return ImageClassifier()
 
-# File uploader for image
-uploaded_file = st.file_uploader("Choose an image...", type="jpg")
+def create_temp_file(uploaded_file) -> str:
+    """Create a temporary file from uploaded content."""
+    try:
+        suffix = os.path.splitext(uploaded_file.name)[1]
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
+            tmp_file.write(uploaded_file.getvalue())
+            return tmp_file.name
+    except Exception as e:
+        logger.error(f"Error creating temporary file: {str(e)}")
+        raise
 
-if uploaded_file is not None:
-    # Display the uploaded image
-    image = Image.open(uploaded_file)
-    st.image(image, caption="Uploaded Image", use_column_width=True)
-    
-    # Save the image to a temporary location
-    temp_image_path = "/tmp/temp_image.jpg"
-    image.save(temp_image_path)
-    
-    if st.button("Classify"):
-        label = classify_image(temp_image_path)
-        st.write(f"Predicted label: {label}")
+def main():
+    st.set_page_config(
+        page_title="PetPals Image Classifier",
+        page_icon="🐾",
+        layout="centered"
+    )
+
+    st.title("🐾 PetPals Image Classification")
+    st.write("""
+    Welcome to PetPals! Upload an image and our AI will help identify what's in it.
+    We use state-of-the-art EfficientNetB7 for accurate classification.
+    """)
+
+    # Initialize classifier
+    classifier = get_classifier()
+
+    # File uploader with clear instructions
+    uploaded_file = st.file_uploader(
+        "Choose an image file (JPG or PNG)",
+        type=["jpg", "jpeg", "png"],
+        help="Upload a clear, well-lit image for best results"
+    )
+
+    if uploaded_file is not None:
+        try:
+            # Display image with loading spinner
+            with st.spinner("Loading image..."):
+                image = Image.open(uploaded_file)
+                st.image(image, caption="Uploaded Image", use_column_width=True)
+
+            # Classification button with progress tracking
+            if st.button("🔍 Classify Image"):
+                with st.spinner("Analyzing image..."):
+                    # Create temporary file
+                    temp_path = create_temp_file(uploaded_file)
+                    
+                    # Get prediction
+                    result = classifier.classify_image(temp_path)
+                    
+                    # Clean up temporary file
+                    os.unlink(temp_path)
+                    
+                    if result:
+                        label, confidence = result
+                        
+                        # Display results in an organized way
+                        st.success("Analysis Complete!")
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.metric("Prediction", label.title())
+                        with col2:
+                            st.metric("Confidence", f"{confidence*100:.1f}%")
+                            
+                        # Show confidence bar
+                        st.progress(confidence)
+                        
+                        # Additional information for low confidence predictions
+                        if confidence < 0.5:
+                            st.warning("⚠️ Low confidence prediction. Consider uploading a clearer image.")
+                    else:
+                        st.error("Failed to classify image. Please try again.")
+
+        except Exception as e:
+            logger.error(f"Error processing upload: {str(e)}")
+            st.error("An error occurred while processing the image. Please try again.")
+
+    # Add helpful information at the bottom
+    with st.expander("ℹ️ Tips for better results"):
+        st.write("""
+        - Upload clear, well-lit images
+        - Ensure the subject is centered in the frame
+        - Avoid blurry or very dark images
+        - Supported formats: JPG and PNG
+        """)
+
+if __name__ == "__main__":
+    main()
